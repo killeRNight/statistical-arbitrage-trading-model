@@ -1,0 +1,2 @@
+# QModel
+Systematic trading strategy
