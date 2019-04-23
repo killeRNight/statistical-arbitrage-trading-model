@@ -1,0 +1,18 @@
+
+Simulation started:
+Initial funds: $1,000,000
+
+Description:
+   PnL: pnl
+   C:   cash
+   L:   longs
+   S:   shorts
+   E:   equity
+   AF:  available funds
+   EL:  excess liquidity
+   SMA: special memorandum account
+   BP:  buying power
+   L:   leverage
+
+Trading date: 2016-01-04 00:00:00. (day: 0)
+PnL: 0. C: 1,000,000. L: 0. S: 0. E: 1,000,000. AF: 1,000,000. EL: 1,000,000. SMA: 1,000,000. BP: 2,000,000. L: 1.00.
