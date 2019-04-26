@@ -185,7 +185,20 @@ class Simulation():
             #       - check if trade order acceptable or not via
             #         (hard cash, available funds and leverage) check.
             # ---------------------------------------------------------
-            portfolio = self.rebalance_portfolio(portfolio, target_list, trade_list, open_today, i)
+            portfolio = self.execute_sell_order(portfolio, target_list, trade_list, open_today, i)
+
+            # Execute buy order (vector implementation)
+            # ---------------------------------------------------------
+            # 1. Balance portfolio according to defined target order:
+            #       - cover existing shorts and open new long positions.
+            # 2. Account validaty control:
+            #       - check minimum equity requirement
+            #         (sim terminated if requirement check is failed)
+            # 3. Trade validaty control:
+            #       - check if trade order acceptable or not via
+            #         (hard cash, available funds and leverage) check.
+            # ---------------------------------------------------------
+            portfolio = self.execute_buy_order(portfolio, target_list, trade_list, open_today, i)
 
             # Update portfolio (end of day).
             # ---------------------------------------------------------
@@ -468,67 +481,98 @@ class Simulation():
         self.logger.info('-' * 120)
         return portfolio
 
-
-    def rebalance_portfolio(self, portfolio, target_list, trade_list, price, day):
-
-        # Trade lists.
+    # Fn: (10)
+    # Sell order.
+    def execute_sell_order(self, portfolio, target_list, trade_list, price, day):
+        # Create trades object to store all
+        # necessary trades for further functions.
+        trades = dict()
+        # Build trade orders based on desired trade direction.
+        trade_list = trade_list * (trade_list < 0)
         actual_list = portfolio.balance['positions'][:, day]
-
-        # Trade masks.
-        # Used to identify open-close orders in both directions.
-        mOS = (target_list < 0) * (trade_list < 0)
-        mOL = (target_list > 0) * (trade_list > 0)
-        mCS = (actual_list < 0) * (trade_list > 0)
-        mCL = (actual_list > 0) * (trade_list < 0)
-
-        # Trades.
-        # Identified trades in both directions.
-        short_open = target_list * mOS - actual_list * mOS * (actual_list < 0)
-        short_close = trade_list * mCS - target_list * mCS * (target_list > 0)
-        long_open = target_list * mOL - actual_list * mOL * (actual_list > 0)
-        long_close = trade_list * mCL - target_list * mCL * (target_list < 0)
-
-        # Close existing long positions.
-        portfolio = self.execute_trade(portfolio, long_close, price, day, tvd=0)
-        self.logging(portfolio, day)
-
-        # Close existing short positions.
-        portfolio = self.execute_trade(portfolio, short_close, price, day, tvd=0)
-        self.logging(portfolio, day)
-
-        # Open new long positions.
-        portfolio = self.execute_trade(portfolio, long_open, price, day, tvd=0)
-        self.logging(portfolio, day)
-
-        # Open new short positions.
-        portfolio = self.execute_trade(portfolio, short_open, price, day, tvd=0)
-        self.logging(portfolio, day)
-
+        # In case of order rejection due to margin requirements
+        # execution function will reduce open order size.
+        mO = (target_list < 0) * (trade_list < 0)
+        open_list = target_list * mO - actual_list * mO * (actual_list < 0)
+        # Fill trades object.
+        trades['actual_list'] = actual_list
+        trades['trade_list'] = trade_list
+        trades['open_list'] = open_list
+        trades['target_list'] = target_list
+        # Execute trade based on trade orders.
+        portfolio = self.run_trade_transaction(portfolio, trades, price, day)
         return portfolio
 
+    # Fn: (11)
+    # Buy order.
+    def execute_buy_order(self, portfolio, target_list, trade_list, price, day):
+        # Create trades object to store all
+        # necessary trades for further functions.
+        trades = dict()
+        # Build trade orders based on desired trade direction.
+        trade_list = trade_list * (trade_list > 0)
+        actual_list = portfolio.balance['positions'][:, day]
+        # In case of order rejection due to margin requirements
+        # execution function will reduce open order size.
+        mO = (target_list > 0) * (trade_list > 0)
+        open_list = target_list * mO - actual_list * mO * (actual_list > 0)
+        # Fill trades object.
+        trades['actual_list'] = actual_list
+        trades['trade_list'] = trade_list
+        trades['open_list'] = open_list
+        trades['target_list'] = target_list
+        # Execute trade based on trade orders.
+        portfolio = self.run_trade_transaction(portfolio, trades, price, day)
+        return portfolio
+
+    # Fn: (12)
+    # Execute trade transaction.
+    def run_trade_transaction(self, portfolio, trades, price, day):
+        # Check initial equity requirement.
+        AcValidaty.check_initial_equity_requirement(self.logger, portfolio, day)
+        # Run trade transaction.
+        portfolio = self.execute_trade(portfolio, trades, price, day, tvd=0)
+        # Log trade transaction.
+        self.logging(portfolio, day)
+        return portfolio
+
+    # Fn: (13)
+    # Execute trade transaction.
+    # In case of positions liquidation.
+    def run_liquidation_transaction(self, portfolio, price, day):
+        # Define liquidation size to match margin requirements.
+        liquidation_size = (portfolio.funds['excess'][day] / portfolio.maintenance_margin) * (-1.0)
+        # Build liquidation trade order.
+        target_list, trade_list = self.build_liquidation_order(portfolio, liquidation_size, price, day)
+        # Call sell - buy execution functions to trade order.
+        self.execute_sell_order(portfolio, target_list, trade_list, price, day)
+        self.execute_buy_order(portfolio, target_list, trade_list, price, day)
+        # Update portfolio statements.
+        self.end_of_day_portfolio_update(portfolio, price, day)
 
     # Fn: (14)
     # Execute trade.
-    def execute_trade(self, portfolio, trade_order, price, day, tvd):
-
-        # Check initial equity requirement.
-        AcValidaty.check_initial_equity_requirement(self.logger, portfolio, day)
+    def execute_trade(self, portfolio, trades, price, day, tvd):
 
         # Decrease trade order size.
-        decrease = np.multiply(trade_order, tvd).astype(np.int32)
-        trade_orderC = trade_order - decrease
+        decrease = np.multiply(trades['open_list'], tvd).astype(np.int32)
+        trade_order = trades['trade_list'] - decrease
+
+        # Update trades object.
+        trades['target_list'] -= decrease
+        trades['trade_list'] -= decrease
 
         # Cost of trade.
         slippage = AcStatements.get_price_slippage(portfolio, price, day)
         price = price + slippage
-        trade_order_size = trade_orderC * price
+        trade_order_size = trade_order * price
         commission = AcStatements.get_commission(self.commissions,
-                                                 trade_orderC, trade_order_size)
+                                                 trade_order, trade_order_size)
         cost_of_trade = np.sum(trade_order_size)
 
         # Cash flows.
         cash = portfolio.balance['cash'][day] - cost_of_trade - commission
-        positions = portfolio.balance['positions'][:, day] + trade_orderC
+        positions = portfolio.balance['positions'][:, day] + trade_order
         value = AcStatements.get_value(positions, price)
         longs = AcStatements.get_longs(value)
         shorts = AcStatements.get_shorts(value)
@@ -540,7 +584,7 @@ class Simulation():
         initial = AcStatements.get_initial_margin(portfolio, longs, shorts)
         maintenance = AcStatements.get_maintenance_margin(portfolio, positions, price)
         regT_total = AcStatements.get_regT_total(portfolio, longs, shorts)
-        regT_current = AcStatements.get_regT_current(portfolio, trade_orderC, price, day)
+        regT_current = AcStatements.get_regT_current(portfolio, trades, price)
 
         # Cash flows (funds)
         available = AcStatements.get_available_funds(equity, initial)
@@ -556,7 +600,7 @@ class Simulation():
 
         if not order_validaty:
             tvd += self.trading_volume_down
-            return self.execute_trade(portfolio, trade_order, price, day, tvd)
+            return self.execute_trade(portfolio, trades, price, day, tvd)
         else:
             # Portfolio (balance).
             portfolio.balance['cash'][day] = cash                                       # update: cash
@@ -583,23 +627,6 @@ class Simulation():
             portfolio.details['turnover'][day] += np.abs(cost_of_trade                  # update: turnover
                                                          / portfolio.equity)            # .....
             return portfolio
-
-
-
-    # Fn: (13)
-    # Execute trade transaction.
-    # In case of positions liquidation.
-    def run_liquidation_transaction(self, portfolio, price, day):
-        # Define liquidation size to match margin requirements.
-        liquidation_size = (portfolio.funds['excess'][day] / portfolio.maintenance_margin) * (-1.0)
-        # Build liquidation trade order.
-        target_list, trade_list = self.build_liquidation_order(portfolio, liquidation_size, price, day)
-        # Call sell - buy execution functions to trade order.
-        self.execute_sell_order(portfolio, target_list, trade_list, price, day)
-        self.execute_buy_order(portfolio, target_list, trade_list, price, day)
-        # Update portfolio statements.
-        self.end_of_day_portfolio_update(portfolio, price, day)
-
 
 
 class AcPortfolio():
@@ -952,11 +979,28 @@ class AcStatements:
     # Fn: (10)
     # RegT Margin (today).
     @staticmethod
-    def get_regT_current(portfolio, trades, price, day):
-        # Trade mark.
-        mark = np.sign(portfolio.balance['positions'][:, day] * trades)
+    def get_regT_current(portfolio, trades, price):
+        # Trade lists.
+        actual_list = trades['actual_list']
+        target_list = trades['target_list']
+        trade_list = trades['trade_list']
+        # Trade masks.
+        # Used to identify open-close orders in both directions.
+        mOS = (target_list < 0) * (trade_list < 0)
+        mOL = (target_list > 0) * (trade_list > 0)
+        mCS = (actual_list < 0) * (trade_list > 0)
+        mCL = (actual_list > 0) * (trade_list < 0)
+        # Trades.
+        # Identified trades in both directions.
+        short_open = np.abs(target_list * mOS - actual_list * mOS * (actual_list < 0))
+        short_close = np.abs(trade_list * mCS - target_list * mCS * (target_list > 0))
+        long_open = np.abs(target_list * mOL - actual_list * mOL * (actual_list > 0))
+        long_close = np.abs(trade_list * mCL - target_list * mCL * (target_list < 0))
+        # Trades current margin.
+        margin_open = np.sum((long_open + short_open) * price * portfolio.regT_margin)
+        margin_close = np.sum((long_close - short_close) * price * portfolio.regT_margin)
         # RegT current margin.
-        regT_current = 0
+        regT_current = margin_close - margin_open
         return regT_current
 
     # Fn: (11)
@@ -993,11 +1037,8 @@ class AcStatements:
     # Leverage.
     @staticmethod
     def get_leverage(equity, longs, shorts):
-        leverage = equity / (longs + shorts)
-        if abs(leverage) == np.inf:
-            return 1
-        else:
-            return leverage
+        leverage = hl.nan_to_zero(equity / (longs + shorts))
+        return leverage
 
     # Fn: (16)
     # Price Slippage.
